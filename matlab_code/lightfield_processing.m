@@ -1,0 +1,194 @@
+clear 
+close all
+clc 
+
+addpath(genpath('/Users/elyselian/Library/CloudStorage/GoogleDrive-elyse16@uw.edu/Shared drives/Shumlak Lab/Diagnostics/Spectroscopy/S_XB'), '-begin')
+
+im = loadSPE('250422  026.spe');
+intensity_shot = im'; 
+
+figure
+imagesc(intensity_shot)
+colormap gray
+colorbar
+clim([0 18000])   % <-- Add this line
+title('Calibration 250422008')
+
+% Load your image
+% im = intensity;  % Assuming 'intensity' is your 1024x1024 image
+
+im_bw = mat2gray(intensity_shot);
+% Threshold the image to find bright regions (you can adjust this)
+bw = imbinarize(im_bw, 'adaptive', 'ForegroundPolarity','bright', 'Sensitivity', 0.56);  % Normalizes and thresholds at 78%
+
+% Clean up noise
+bw = bwareaopen(bw, 100);   % Removes tiny noise smaller than 30 pixels
+
+figure
+imagesc(bw)
+
+%%
+% 
+% addpath(genpath('/Users/elyselian/Library/CloudStorage/GoogleDrive-elyse16@uw.edu/Shared drives/Shumlak Lab/Diagnostics/Spectroscopy/S_XB/Data/Calibration/250328'), '-begin') % adding import data path
+% 
+% sp = cell(1,1);
+% 
+% sp{1,1} = loadSPE('250328  001.spe'); % load data 
+% sp{2,1} = loadSPE('250328  002.spe'); % load data 
+% 
+% intensity_matrix = zeros(1024);
+% 
+% for i = 1:length(sp)
+%     intensity_matrix = intensity_matrix + sp{i,1}.int; %  load intensity from light field structure
+% end
+% 
+% intensity_matrix(intensity_matrix > 10000) = 0;
+% 
+% filtered_matrix = lowpass(intensity_matrix, 0.01, 1) ./ length(sp); % filter out pixel noise 
+
+% chord_region = filtered_matrix(:, 1); 
+% [bright_pixels, ~] = findpeaks(chord_region, 'MinPeakHeight', 1300, 'MinPeakDistance', 25,'NPeaks',20);
+% peak finder with set minimum peak height and minimum peak distance 
+
+% if length(bright_pixels) ~= 20mode
+%    error('Error at index %d: Expected 20 peaks, but found %d.', i, length(bright_pixels));
+% end
+% throws an error if there's more or less than 20 peaks to guess and
+% check parameters above and avoid errors in binning
+% 
+% row_means = mean(filtered_matrix, 2);  
+% [~, max_row_index] = max(row_means);
+
+% lamp_uv_data = readmatrix('/Users/elyselian/Downloads/DH3_Plus_Calibration_UV - Sheet1.csv');
+% wavelength_query = linspace(226.654, 232.726, 1024); 
+% wavelength = lamp_uv_data(:,1); %nm
+% irradiance_per_nm = lamp_uv_data(:,2); %uW/cm^2/nm
+% irradiance_q = interp1(wavelength, irradiance_per_nm, wavelength_query, 'spline') .* wavelength_query; %uW/cm^2 
+% % convert calibration data to a 1024 point curve for irradiance
+% 
+% % construct function for least squares fitting
+% pixel = 1:1024;
+% cal_curve = @(x) interp1(pixel, irradiance_q, x, 'spline');
+% 
+% % model for lsq fitting
+% model = @(params, x_data) params(1) * cal_curve(x_data) + params(2);
+% initial_guess = [2, 10];
+% 
+% % irradiance_q = cal_curve(wavelength_query);
+% % count_q = filtered_matrix(max_row_index, :);
+% params_fit = lsqcurvefit(model, initial_guess, pixel, count_q);
+% 
+% % fitted counts data
+% count_fitted = model(params_fit, pixel);
+% 
+% %gate_ratio = gate_calibration / gate_shot; % exposure multipler 
+% gate_ratio = 21 / 1e-6;
+% 
+% irr = irradiance_q ./ count_fitted .* gate_ratio; 
+
+%%
+
+% clear 
+% close all
+% clc 
+
+folderPath = '/Users/elyselian/Library/CloudStorage/GoogleDrive-elyse16@uw.edu/Shared drives/Shumlak Lab/Diagnostics/Spectroscopy/S_XB/Data/Calibration/250422/';
+
+% Initialize structure
+fibers = struct();
+fiberCount = 0;
+
+% Loop over file numbers 1 to 28
+for idx = 7:26
+    % Format the file name correctly: 3 digits with leading zeros
+    fileNumber = sprintf('%03d', idx);  % e.g., 001, 002, ..., 028
+    fileName = ['250422  ', fileNumber, '.spe'];  % Note double spaces!
+
+    % Full path to the file
+    fullFilePath = fullfile(folderPath, fileName);
+
+    % Check if the file exists
+    if ~isfile(fullFilePath)
+        warning(['File not found: ', fullFilePath]);
+        continue;
+    end
+
+    % Load file
+    intensity = loadSPE(fullFilePath)';
+    % intensity = imStruct.int;
+
+    % Normalize
+    imNorm = mat2gray(intensity);
+
+    % Threshold
+    bw = imbinarize(imNorm, 'adaptive', 'ForegroundPolarity','bright', 'Sensitivity', 0.56);
+
+    % Remove small blobs
+    bw = bwareaopen(bw, 70);
+
+    % Label connected regions
+    labeledImage = logical(bw);
+
+    % Measure region
+    stats = regionprops(labeledImage, 'BoundingBox');
+    cen = regionprops(labeledImage, 'Centroid');
+
+    % Assume one fiber per image
+    if length(stats) == 1
+        fiberCount = fiberCount + 1;
+
+        bbox = stats(1).BoundingBox;
+        x1 = floor(bbox(1));
+        y1 = floor(bbox(2));
+        x2 = ceil(bbox(1) + bbox(3) - 1);
+        y2 = ceil(bbox(2) + bbox(4) - 1);
+
+        x1 = max(1, x1); y1 = max(1, y1);
+        x2 = min(size(intensity,2), x2); y2 = min(size(intensity,1), y2);
+
+        coord = cen.Centroid;
+
+        % Save fiber
+        fibers(fiberCount).image = intensity(y1:y2, x1:x2);
+        fibers(fiberCount).BoundingBox = bbox;
+        fibers(fiberCount).FileName = fileName;
+        mean_row_intensity = mean(fibers(fiberCount).image, 1); 
+        fibers(fiberCount).rowintensity = movmean(mean_row_intensity, 30);
+        fibers(fiberCount).irradiancepcount = getIrradianceMultiplier_V2(fibers(fiberCount).rowintensity);
+        
+        % Store centroid index
+        centroidIndex = round(coord);
+        fibers(fiberCount).CentroidIndex = centroidIndex;
+
+    else
+        disp(['Warning: More than 1 region found in ', fileName]);
+    end
+end
+
+% Save the fibers structure
+save('fiber_regions.mat', 'fibers');
+
+disp(['Saved ', num2str(fiberCount), ' fibers to fiber_regions.mat']);
+
+% ---- Visualization ----
+% Plot bounding boxes
+
+%%
+
+addpath(genpath('/Users/elyselian/Library/CloudStorage/GoogleDrive-elyse16@uw.edu/Shared drives/Shumlak Lab/Diagnostics/Spectroscopy/S_XB'), '-begin')
+
+im = loadSPE('250424  010.spe');
+intensity_shot = im.int; 
+
+figure
+imshow(intensity_shot, [])
+axis image
+hold on
+
+for i = 1:fiberCount
+    rectangle('Position', fibers(i).BoundingBox, 'EdgeColor', 'r', 'LineWidth', 2);
+    text(fibers(i).BoundingBox(1), fibers(i).BoundingBox(2)-10, ['Fiber ', num2str(i)], 'Color', 'yellow', 'FontSize', 8);
+end
+
+title('All Fiber Regions')
+hold off
