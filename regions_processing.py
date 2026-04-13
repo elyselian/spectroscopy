@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+# from scipy.integrate import trapz
 from scipy.ndimage import uniform_filter1d
 from scipy.interpolate import CubicSpline
 from skimage.filters import threshold_sauvola
@@ -262,6 +263,13 @@ def contrast_clip_rescale(img, low_pct=1.0, high_pct=99.7):
     x = (x - lo) / (hi - lo)
     return x
 
+import numpy as np
+from scipy.ndimage import uniform_filter1d
+from skimage.filters import threshold_sauvola
+from skimage.measure import label, regionprops
+from skimage.morphology import remove_small_objects
+
+
 def extract_fiber_and_calibrate(
     img: np.ndarray,
     *,
@@ -269,24 +277,23 @@ def extract_fiber_and_calibrate(
     min_area: int = 70,
     sauvola_window: int = 51,
     sauvola_k: float = 0.2,
-    # Profile parameters (important!)
-    profile_half_height: int = 3,   # average rows (centroid-row +/- this many)
-    smooth_window: int = 30,
+    profile_half_height: int = 3,      # extraction half-height around traced centerline
+    trace_half_height: int = 8,        # search half-height for finding yc(x)
+    smooth_window: int = 31,           # smoothing for traced centerline
+    spectral_smooth_window: int = 30,  # smoothing for final extracted spectrum
     n_pixels: int = 1024,
-    n_fibers: int = 1,
+    n_fibers: int = 20,
 ):
     """
     1) Segment fiber regions.
     2) Pick the top *n_fibers* regions by area.
-    3) For each, compute a *full-width* (length 1024) row profile from rows
-       around the region centroid.
-    4) Compute irradiance-per-count multiplier via lamp calibration.
+    3) For each fiber, trace the centerline yc(x) across the full detector width.
+    4) Extract a wavelength profile by averaging rows around yc(x).
+    5) Compute irradiance-per-count multiplier via lamp calibration.
 
     Returns:
-        n_fibers == 1 (default): single dict, or None if nothing found.
-        n_fibers  > 1:           list of dicts sorted top-to-bottom by centroid row,
-                                 may be shorter than n_fibers if fewer regions exist.
-                                 Empty list if nothing found.
+        n_fibers == 1: single dict, or None if nothing found
+        n_fibers > 1 : list of dicts sorted top-to-bottom
     """
     img = np.asarray(img)
     if img.ndim != 2:
@@ -306,9 +313,74 @@ def extract_fiber_and_calibrate(
     if not props:
         return None if n_fibers == 1 else []
 
-    # Take top n_fibers regions by area, then sort top-to-bottom
     props_sorted = sorted(props, key=lambda r: r.area, reverse=True)[:n_fibers]
-    props_sorted.sort(key=lambda r: r.centroid[0])  # sort by row (top → bottom)
+    props_sorted.sort(key=lambda r: r.centroid[0])  # top -> bottom
+
+    H, W = img.shape
+    y_coords = np.arange(H, dtype=np.float64)
+
+    def _trace_centerline(region):
+        """
+        Compute yc(x): fiber center row as a function of detector column x.
+        Uses intensity-weighted centroid within a local vertical window.
+        """
+        centroid_r, centroid_c = region.centroid
+        yc = np.full(W, np.nan, dtype=np.float64)
+
+        # Start with a global seed row from region centroid
+        seed_row = int(round(centroid_r))
+
+        for col in range(W):
+            r0 = max(0, seed_row - trace_half_height)
+            r1 = min(H, seed_row + trace_half_height + 1)
+
+            col_vals = img[r0:r1, col].astype(np.float64)
+
+            # Background remove with local minimum so centroid isn't biased
+            col_vals = col_vals - np.min(col_vals)
+            s = col_vals.sum()
+
+            if s > 0:
+                rows_local = np.arange(r0, r1, dtype=np.float64)
+                yc[col] = np.sum(rows_local * col_vals) / s
+
+        # Fill any missing columns by interpolation
+        good = np.isfinite(yc)
+        if good.sum() < 2:
+            # fallback: flat line at centroid
+            yc[:] = centroid_r
+        else:
+            xp = np.flatnonzero(good)
+            fp = yc[good]
+            yc = np.interp(np.arange(W), xp, fp)
+
+        # Smooth centerline
+        if smooth_window > 1:
+            yc = uniform_filter1d(yc, size=smooth_window, mode="nearest")
+
+        return yc
+
+    def _extract_profile_from_trace(yc):
+        """
+        Extract 1D spectrum by averaging rows around traced centerline yc(x).
+        """
+        profile = np.zeros(W, dtype=np.float64)
+
+        for col in range(W):
+            yc_col = yc[col]
+            r_center = int(round(yc_col))
+            r0 = max(0, r_center - profile_half_height)
+            r1 = min(H, r_center + profile_half_height + 1)
+            profile[col] = img[r0:r1, col].mean()
+
+        if spectral_smooth_window > 1:
+            profile = uniform_filter1d(
+                profile,
+                size=spectral_smooth_window,
+                mode="nearest"
+            )
+
+        return profile
 
     def _build_fiber_dict(region):
         minr, minc, maxr, maxc = region.bbox
@@ -317,14 +389,14 @@ def extract_fiber_and_calibrate(
         centroid_r, centroid_c = region.centroid
         centroid_index = (int(round(centroid_r)), int(round(centroid_c)))
 
-        r0 = max(0, centroid_index[0] - profile_half_height)
-        r1 = min(img.shape[0], centroid_index[0] + profile_half_height + 1)
-        row_profile_full = img[r0:r1, :].mean(axis=0).astype(np.float64)
+        # Step 1: trace the fiber centerline yc(x)
+        centerline_y = _trace_centerline(region)
 
-        row_profile_full_smooth = uniform_filter1d(row_profile_full, size=smooth_window, mode="nearest")
+        # Step 2: extract along traced centerline
+        row_profile_full = _extract_profile_from_trace(centerline_y)
 
         irr = get_irradiance_multiplier(
-            row_profile_full_smooth,
+            row_profile_full,
             lamp_csv_path=lamp_csv_path,
             n_pixels=n_pixels
         )
@@ -335,7 +407,8 @@ def extract_fiber_and_calibrate(
             "centroid_index": centroid_index,
             "area": int(region.area),
             "crop": crop,
-            "row_profile_full": row_profile_full_smooth,
+            "centerline_y": centerline_y,   # yc(x)
+            "row_profile_full": row_profile_full,
             "irradiance_multiplier": irr["multiplier_uW_cm2_per_count"],
             "wavelength_nm": irr["wavelength_nm"],
             "irradiance_q_uW_cm2": irr["irradiance_q_uW_cm2"],
@@ -389,6 +462,7 @@ def show_fiber_boxes(img: np.ndarray, fibers, title="Fiber Regions"):
     vmin = np.percentile(img, 1)
     vmax = np.percentile(img, 99.7)
     ax.imshow(img, cmap="gray", vmin=vmin, vmax=vmax, aspect='auto')
+    plt.colorbar(ax.images[0], ax=ax, fraction=0.046, pad=0.04)
     ax.set_title(title)
     ax.axis("off")
 
@@ -442,3 +516,237 @@ def build_fiber_calibration():
     with open(OUT_FILE, "wb") as f:
         pickle.dump(fibers, f)
     return fibers
+
+import numpy as np
+from scipy.ndimage import uniform_filter1d
+from skimage.filters import threshold_sauvola
+from skimage.morphology import remove_small_objects
+
+def extract_real_image_fiber_intensities(
+    img: np.ndarray,
+    fibers: list,
+    *,
+    min_area: int = 20,
+    sauvola_window: int = 31,
+    sauvola_k: float = 0.2,
+    bbox_pad_y: int = 6,
+    bbox_pad_x: int = 6,
+    trace_half_height: int = 6,
+    profile_half_height: int = 3,
+    centerline_smooth_window: int = 21,
+    spectrum_smooth_window: int = 1,
+    use_trapz: bool = True,
+):
+    """
+    For each fiber (defined from calibration image geometry), do the following on a real image:
+      1) restrict to the fiber's local bbox region
+      2) threshold to find illuminated pixels
+      3) background subtract using dark pixels in that same local region
+      4) collapse spatial dimension -> 1D intensity vs wavelength
+      5) convert counts to uW/cm^2 using irradiance_multiplier
+      6) integrate spectral dimension -> one scalar intensity per fiber
+      7) return all 20 values in one array
+
+    Parameters
+    ----------
+    img : 2D ndarray
+        Real image.
+    fibers : list of dict
+        Output from your calibration extraction function, one dict per fiber.
+        Each fiber dict must contain:
+            - "bbox"
+            - "centroid"
+            - "irradiance_multiplier"
+            - optionally "centerline_y"
+            - optionally "wavelength_nm"
+    min_area : int
+        Minimum illuminated blob area inside local bbox.
+    sauvola_window, sauvola_k
+        Same threshold logic style as calibration.
+    bbox_pad_y, bbox_pad_x
+        Extra margin around stored bbox when searching for illuminated region.
+    trace_half_height
+        Vertical search half-height for local centroid tracing.
+    profile_half_height
+        Vertical half-height used for spatial collapse around traced centerline.
+    centerline_smooth_window
+        Smoothing window for traced centerline.
+    spectrum_smooth_window
+        Optional smoothing of final 1D spectrum.
+    use_trapz : bool
+        If True and wavelength_nm exists, integrate with np.trapz over wavelength.
+        Otherwise sum over pixel index.
+
+    Returns
+    -------
+    result : dict with keys
+        "fiber_intensities_uW_cm2" : (N,) ndarray
+        "spectra_counts"           : list of 1D arrays
+        "spectra_uW_cm2"           : list of 1D arrays
+        "illuminated_masks"        : list of 2D bool arrays (local bbox masks)
+        "local_bboxes"             : list of (x, y, w, h)
+    """
+    img = np.asarray(img, dtype=np.float64)
+    if img.ndim != 2:
+        raise ValueError(f"Expected 2D image, got {img.shape}")
+
+    H, W = img.shape
+    y_all = np.arange(H, dtype=np.float64)
+
+    intensities = []
+    spectra_counts = []
+    spectra_uW = []
+    illuminated_masks = []
+    local_bboxes = []
+
+    for fiber in fibers:
+        # --- calibration bbox ---
+        bx, by, bw, bh = fiber["bbox"]   # x, y, w, h
+
+        # expand local search box a bit
+        x0 = max(0, bx - bbox_pad_x)
+        x1 = min(W, bx + bw + bbox_pad_x)
+        y0 = max(0, by - bbox_pad_y)
+        y1 = min(H, by + bh + bbox_pad_y)
+
+        local = img[y0:y1, x0:x1]
+
+        # --- threshold illuminated region inside this fiber's local area ---
+        x_local = contrast_clip_rescale(local, low_pct=1.0, high_pct=99.7)
+        thr = threshold_sauvola(x_local, window_size=sauvola_window, k=sauvola_k)
+        illum_mask = x_local > thr
+        illum_mask = remove_small_objects(illum_mask, min_size=min_area)
+
+        # If nothing survives threshold, return zeros for this fiber
+        if not np.any(illum_mask):
+            local_bboxes.append((x0, y0, x1 - x0, y1 - y0))
+            illuminated_masks.append(illum_mask)
+            spectra_counts.append(np.zeros(W, dtype=np.float64))
+            spectra_uW.append(np.zeros(W, dtype=np.float64))
+            intensities.append(0.0)
+            continue
+
+        # --- background estimate from dark pixels in the SAME local bbox ---
+        dark_mask = ~illum_mask
+
+        # columnwise background from dark region
+        bg_col = np.zeros(local.shape[1], dtype=np.float64)
+        for j in range(local.shape[1]):
+            dark_vals = local[dark_mask[:, j], j]
+            if dark_vals.size > 0:
+                bg_col[j] = np.median(dark_vals)
+            else:
+                bg_col[j] = np.median(local[:, j])
+
+        # subtract background column-by-column
+        local_bs = local - bg_col[None, :]
+
+        # --- trace centerline only where fiber is illuminated ---
+        yc_local = np.full(local.shape[1], np.nan, dtype=np.float64)
+
+        # use calibration centerline if available, otherwise centroid row
+        if "centerline_y" in fiber:
+            yc_seed_global = np.asarray(fiber["centerline_y"], dtype=np.float64)
+            yc_seed_local = yc_seed_global[x0:x1] - y0
+        else:
+            yc_seed_local = np.full(local.shape[1], fiber["centroid"][0] - y0, dtype=np.float64)
+
+        for j in range(local.shape[1]):
+            rows_illum = np.flatnonzero(illum_mask[:, j])
+
+            if rows_illum.size == 0:
+                continue
+
+            # restrict centroid calculation around expected fiber location
+            seed_row = int(round(yc_seed_local[j]))
+            r0 = max(0, seed_row - trace_half_height)
+            r1 = min(local.shape[0], seed_row + trace_half_height + 1)
+
+            rows_use = np.arange(r0, r1)
+            valid = illum_mask[r0:r1, j]
+
+            if not np.any(valid):
+                continue
+
+            vals = local_bs[r0:r1, j].copy()
+            vals[~valid] = 0.0
+            vals = np.clip(vals, 0.0, None)
+
+            s = vals.sum()
+            if s > 0:
+                yc_local[j] = np.sum(rows_use * vals) / s
+
+        # fill missing columns by interpolation, fall back to seed
+        good = np.isfinite(yc_local)
+        if good.sum() >= 2:
+            xp = np.flatnonzero(good)
+            fp = yc_local[good]
+            yc_local = np.interp(np.arange(local.shape[1]), xp, fp)
+        else:
+            yc_local = yc_seed_local.copy()
+
+        if centerline_smooth_window > 1:
+            yc_local = uniform_filter1d(
+                yc_local,
+                size=centerline_smooth_window,
+                mode="nearest"
+            )
+
+        # --- collapse spatial dimension to get 1D counts spectrum ---
+        spectrum_local = np.zeros(local.shape[1], dtype=np.float64)
+
+        for j in range(local.shape[1]):
+            yc_j = int(round(yc_local[j]))
+            r0 = max(0, yc_j - profile_half_height)
+            r1 = min(local.shape[0], yc_j + profile_half_height + 1)
+
+            vals = local_bs[r0:r1, j]
+
+            # only keep positive, background-subtracted signal
+            vals = np.clip(vals, 0.0, None)
+
+            # use SUM, not mean, so this represents total spectral brightness
+            spectrum_local[j] = vals.sum()
+
+        if spectrum_smooth_window > 1:
+            spectrum_local = uniform_filter1d(
+                spectrum_local,
+                size=spectrum_smooth_window,
+                mode="nearest"
+            )
+
+        # --- embed local spectrum into full-width spectrum ---
+        spectrum_full = np.zeros(W, dtype=np.float64)
+        spectrum_full[x0:x1] = spectrum_local
+
+        # --- convert to uW/cm^2 using irradiance multiplier array ---
+        irr_mult = np.asarray(fiber["irradiance_multiplier"], dtype=np.float64)
+        if irr_mult.shape[0] != W:
+            raise ValueError("irradiance_multiplier length does not match image width")
+
+        spectrum_uW = spectrum_full * irr_mult
+
+        # --- integrate spectral dimension to one scalar ---
+        wavelength_nm = fiber.get("wavelength_nm", None)
+
+        if use_trapz and wavelength_nm is not None:
+            wavelength_nm = np.asarray(wavelength_nm, dtype=np.float64)
+            if wavelength_nm.shape[0] != W:
+                raise ValueError("wavelength_nm length does not match image width")
+            intensity_val = np.trapezoid(spectrum_uW, wavelength_nm)
+        else:
+            intensity_val = np.sum(spectrum_uW)
+
+        local_bboxes.append((x0, y0, x1 - x0, y1 - y0))
+        illuminated_masks.append(illum_mask)
+        spectra_counts.append(spectrum_full)
+        spectra_uW.append(spectrum_uW)
+        intensities.append(float(intensity_val))
+
+    return {
+        "fiber_intensities_uW_cm2": np.array(intensities, dtype=np.float64),
+        "spectra_counts": spectra_counts,
+        "spectra_uW_cm2": spectra_uW,
+        "illuminated_masks": illuminated_masks,
+        "local_bboxes": local_bboxes,
+    }

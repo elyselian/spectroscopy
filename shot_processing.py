@@ -278,14 +278,16 @@ def onion_peel(L, I, eps_piv=1e-15):
 #     return eps
 
 def tikhonov_inversion(L, I, lam, w_inner):
-    N = L.shape[0]
+    # L is the geometry/path-length matrix with shape (M_chords, N_shells).
+    # We regularize/solve for N_shells unknown emissivities.
+    N = L.shape[1]
 
     # Build second-derivative matrix (size (N-2) x N)
-    D2 = np.zeros((N-2, N))
-    for i in range(N-2):
-        D2[i, i]   = 1.0
-        D2[i, i+1] = -2.0
-        D2[i, i+2] = 1.0
+    D2 = np.zeros((max(N - 2, 0), N))
+    for i in range(max(N - 2, 0)):
+        D2[i, i] = 1.0
+        D2[i, i + 1] = -2.0
+        D2[i, i + 2] = 1.0
 
     # Optional weighting matrix for inner bin
     W = np.eye(N)

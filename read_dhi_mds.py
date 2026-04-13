@@ -16,11 +16,33 @@ Created on Tue Jun  3 17:10:52 2025
 import MDSplus as mds
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.integrate import trapz, cumtrapz, quad, cumulative_trapezoid, trapezoid
+try:
+    # SciPy >= 1.10 prefers these names
+    from scipy.integrate import quad, cumulative_trapezoid, trapezoid
+except Exception:  # pragma: no cover
+    # Older SciPy
+    from scipy.integrate import quad, cumtrapz as cumulative_trapezoid, trapz as trapezoid
+
+# Backwards-compatible aliases used in some legacy scripts
+trapz = trapezoid
+cumtrapz = cumulative_trapezoid
 from scipy.signal import savgol_filter
 from scipy.optimize import curve_fit
 import scipy.io as sio
 # from sympy import symbols, integrate
+
+
+def _mds_connect(hosts=("zappa.zap", "172.25.35.142")):
+    """Connect to MDSplus, trying multiple hosts (DNS + raw IP)."""
+    last_exc = None
+    for host in hosts:
+        try:
+            return mds.Connection(host)
+        except Exception as exc:  # pragma: no cover
+            last_exc = exc
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("No MDSplus hosts provided")
 
 def dhi_profiles(chordconfig, radius):
     """
@@ -48,8 +70,8 @@ Returns:
     
     """    
        
-        # Connect to the zappa server
-        c = mds.Connection('zappa.zap')
+        # Connect to the zappa server (hostname or IP)
+        c = _mds_connect()
         c.get("getenv('zaphd_path')")
         # Open the tree for a given shot
         c.openTree('zaphd',shot)
@@ -181,56 +203,65 @@ Returns:
     
     # This one maybe better?
     # These seem to be the correct magnitudes: https://www.dropbox.com/scl/fo/7t95undjeej1ntfgmwr16/AAh4VcZSKXiAyhHq9B9uyio?rlkey=3403qtq3k8dumm5qeyqpvr31t&st=k8liyxrs&dl=0
-    dhi_import = sio.loadmat('G:\\Shared drives\\Shumlak Lab\\Users\\Current\\Aqil Khairi\\Python\\dhi_error_data_160524021.mat')
-    
-    # This selects the array for z = 8 cm
-    i = 1
-    
-    # Get the error values for left and right of the centroid
-    
-    # ne_error_l = np.abs(dhi_import["n_error_l"][0][i].flatten())
-    # ne_error_r = np.abs(dhi_import["n_error_r"][0][i].flatten())
-    
-    ne_error_l = np.abs(dhi_import["n_error_out_interp_l"][0][i].flatten())
-    ne_error_r = np.abs(dhi_import["n_error_out_interp_r"][0][i].flatten())
-    
-    # Get the number density values for left and right of the centroid
-    ne_l = dhi_import["den_num_axial_l_plt"][0][i].flatten()
-    ne_r = dhi_import["den_num_axial_r_plt"][0][i].flatten()
-    
-    # Get the corresponding radial values
-    rad_l = 100*np.transpose(dhi_import["rad_l"][0][i]).flatten()
-    rad_r = 100*np.transpose(dhi_import["rad_r"][0][i]).flatten()
-    
-    # Use density values from this file instead of MDSPlus
-    r_ne = rad_l
-    
-    # Pads the shorter positive side with data from the negative side 
-    ne_l_pad = ne_l[len(ne_r):]
-    ne_r_pos_pad = np.concatenate((ne_r, ne_l_pad))
-    
-    ne_radial_avg = 0.5 * (ne_r_pos_pad + ne_l) # In m^-3
-    
-    fig = plt.figure()
-    plt.title('Number density with error bars: ' + str(shot))
+    try:
+        dhi_import = sio.loadmat(
+            'G:\\Shared drives\\Shumlak Lab\\Users\\Current\\Aqil Khairi\\Python\\dhi_error_data_160524021.mat'
+        )
 
-    plt.plot(r_ne[0:85], ne_radial_avg[0:85]/1e23, 'k')
-    plt.errorbar(r_ne[::5], ne_radial_avg[::5]/1e23, ne_error_l[::5]/1e23, fmt = 'k', label = 'Error', ecolor = 'black', capsize = 5, linestyle = 'none')
+        # This selects the array for z = 8 cm
+        i = 1
 
-    plt.xlim([0, 1])
-    plt.ylim([0, 4])
-    plt.xlabel('Radial position [cm]')
-    plt.ylabel('$n_e$ [10$^{23}$ m$^{-3}$]')
-    # plt.legend()
-    # plt.close()
-    
-    # Rename error bar array for outside use
-    ne_error_out = ne_error_l
+        # Get the error values for left and right of the centroid
+        ne_error_l = np.abs(dhi_import["n_error_out_interp_l"][0][i].flatten())
+        ne_error_r = np.abs(dhi_import["n_error_out_interp_r"][0][i].flatten())
+
+        # Get the number density values for left and right of the centroid
+        ne_l = dhi_import["den_num_axial_l_plt"][0][i].flatten()
+        ne_r = dhi_import["den_num_axial_r_plt"][0][i].flatten()
+
+        # Get the corresponding radial values
+        rad_l = 100 * np.transpose(dhi_import["rad_l"][0][i]).flatten()
+        rad_r = 100 * np.transpose(dhi_import["rad_r"][0][i]).flatten()
+
+        # Use density values from this file instead of MDSPlus
+        r_ne = rad_l
+
+        # Pads the shorter positive side with data from the negative side
+        ne_l_pad = ne_l[len(ne_r) :]
+        ne_r_pos_pad = np.concatenate((ne_r, ne_l_pad))
+
+        ne_radial_avg = 0.5 * (ne_r_pos_pad + ne_l)  # In m^-3
+
+        fig = plt.figure()
+        plt.title('Number density with error bars: ' + str(shot))
+
+        plt.plot(r_ne[0:85], ne_radial_avg[0:85] / 1e23, 'k')
+        plt.errorbar(
+            r_ne[::5],
+            ne_radial_avg[::5] / 1e23,
+            ne_error_l[::5] / 1e23,
+            fmt='k',
+            label='Error',
+            ecolor='black',
+            capsize=5,
+            linestyle='none',
+        )
+
+        plt.xlim([0, 1])
+        plt.ylim([0, 4])
+        plt.xlabel('Radial position [cm]')
+        plt.ylabel('$n_e$ [10$^{23}$ m$^{-3}$]')
+
+        # Rename error bar array for outside use
+        ne_error_out = ne_error_l
+    except FileNotFoundError:
+        # Shared-drive .mat file not available; continue with MDSplus-derived profile.
+        ne_error_out = np.zeros_like(ne_radial_avg)
     
     #%% # Get currents at m0 at P10
     
     # Connect to the zappa server
-    c = mds.Connection('zappa.zap')
+    c = _mds_connect()
     c.get("getenv('zaphd_path')")
     
     # Open the tree for a given shot
