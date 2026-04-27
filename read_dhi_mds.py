@@ -44,7 +44,7 @@ def _mds_connect(hosts=("zappa.zap", "172.25.35.142")):
         raise last_exc
     raise RuntimeError("No MDSplus hosts provided")
 
-def dhi_profiles(chordconfig, radius):
+def dhi_profiles(chordconfig, radius, shot=160524021):
     """
 Outputs the radial profiles of electron number density, azimuthal magnetic field, and electron temperature. 
 
@@ -97,7 +97,7 @@ Returns:
     
     
     # Select shot number
-    shot = 160524021
+    # shot = 160524021
     
     # Import DHI data stored in MDSPlus
     dhi_data = get_dhi(shot)

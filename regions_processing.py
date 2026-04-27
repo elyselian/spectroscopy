@@ -24,6 +24,7 @@ Dependencies:
 
 import os
 import pickle
+from threading import local
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -630,13 +631,24 @@ def extract_real_image_fiber_intensities(
         dark_mask = ~illum_mask
 
         # columnwise background from dark region
-        bg_col = np.zeros(local.shape[1], dtype=np.float64)
+        bg_col = np.full(local.shape[1], np.nan, dtype=np.float64)
+
+        # First pass: compute background where dark pixels exist
         for j in range(local.shape[1]):
             dark_vals = local[dark_mask[:, j], j]
             if dark_vals.size > 0:
                 bg_col[j] = np.median(dark_vals)
-            else:
-                bg_col[j] = np.median(local[:, j])
+
+        # Second pass: fill missing columns by interpolation
+        good = np.isfinite(bg_col)
+
+        if good.sum() >= 2:
+            xp = np.flatnonzero(good)
+            fp = bg_col[good]
+            bg_col = np.interp(np.arange(local.shape[1]), xp, fp)
+        else:
+            # fallback if almost everything is illuminated
+            bg_col[:] = np.median(local)
 
         # subtract background column-by-column
         local_bs = local - bg_col[None, :]
