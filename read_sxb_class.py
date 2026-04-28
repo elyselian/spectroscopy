@@ -22,6 +22,8 @@ Created on Sat Apr  5 18:55:11 2025
 # Import required packages
 
 import math
+import os
+from pathlib import Path
 import matplotlib.pyplot as plt
 from mpl_toolkits import mplot3d
 import numpy as np
@@ -37,8 +39,11 @@ class read_sxb:
         
     #%% Import data from selected .csv files:
 
-    # Enter the file path to the .csv containing S/XB data for C-III:
-    file_paths = ['G:\\Shared drives\\Shumlak Lab\\Diagnostics\\Spectroscopy\\S_XB\\Data\\SXB Coefficients\\sxb96#c_pju#c2.csv']
+    # Enter the file path to the .csv containing S/XB data for C-III.
+    # Prefer the repo-local copy if it exists; otherwise fall back to the shared drive.
+    _local_csv = Path(__file__).with_name("SXB Coefficients") / "sxb96#c_pju#c2.csv"
+    _shared_csv = Path(r"G:\Shared drives\Shumlak Lab\Diagnostics\Spectroscopy\S_XB\Data\SXB Coefficients\sxb96#c_pju#c2.csv")
+    file_paths = [str(_local_csv if _local_csv.exists() else _shared_csv)]
     
     # Initialize an empty list to store DataFrames
     data_arrays = []

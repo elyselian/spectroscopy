@@ -2,7 +2,7 @@
 Fiber ROI extraction + irradiance-per-count multiplier pipeline (Python-native)
 
 Root path is Windows:
-    G:\Shared drives\Shumlak Lab
+    G:\\Shared drives\\Shumlak Lab
 
 What this does:
 1) Loops over calibration SPEs (e.g., 250422  007.spe ... 026.spe)
@@ -37,7 +37,10 @@ from skimage.morphology import remove_small_objects
 from skimage.measure import label, regionprops
 from matplotlib.patches import Rectangle
 
-import spe_loader as sl  # this is what your installed spe2py uses
+try:
+    import spe_loader as sl  # type: ignore  # optional; some environments won't have this
+except Exception:  # pragma: no cover
+    sl = None
 
 
 ROOT = r"G:\Shared drives\Shumlak Lab"
@@ -537,9 +540,10 @@ def extract_real_image_fiber_intensities(
     centerline_smooth_window: int = 21,
     spectrum_smooth_window: int = 1,
     use_trapz: bool = True,
+    spatial_collapse: str = "sum",
 ):
     """
-    For each fiber (defined from calibration image geometry), do the following on a real image:
+        For each fiber (defined from calibration image geometry), do the following on a real image:
       1) restrict to the fiber's local bbox region
       2) threshold to find illuminated pixels
       3) background subtract using dark pixels in that same local region
@@ -577,6 +581,11 @@ def extract_real_image_fiber_intensities(
     use_trapz : bool
         If True and wavelength_nm exists, integrate with np.trapz over wavelength.
         Otherwise sum over pixel index.
+    spatial_collapse : {"sum", "mean"}
+        How to collapse the spatial dimension into a 1D spectrum within the
+        illuminated fiber region. Use "mean" if you want an average spectrum
+        (less sensitive to the chosen profile height), or "sum" for total
+        brightness.
 
     Returns
     -------
@@ -717,8 +726,14 @@ def extract_real_image_fiber_intensities(
             # only keep positive, background-subtracted signal
             vals = np.clip(vals, 0.0, None)
 
-            # use SUM, not mean, so this represents total spectral brightness
-            spectrum_local[j] = vals.sum()
+            if spatial_collapse == "mean":
+                spectrum_local[j] = vals.mean() if vals.size else 0.0
+            elif spatial_collapse == "sum":
+                spectrum_local[j] = vals.sum()
+            else:
+                raise ValueError(
+                    f"spatial_collapse must be 'sum' or 'mean', got {spatial_collapse!r}"
+                )
 
         if spectrum_smooth_window > 1:
             spectrum_local = uniform_filter1d(
